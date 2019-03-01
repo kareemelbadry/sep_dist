@@ -48,11 +48,11 @@ def double_power_law_likelihood(loga_i, p1, p2, log_ab, loga_min, loga_max):
     phi_i[m] = a_i[m]**(-p1)
     return phi_i
     
-
 def analytic_integrand_weights_double_power_law(p1, p2, log_ab, beta, theta_0, d_pc, loga_min,
     loga_max):
     '''
     Helper function for computing the integral in the numerator of Eq 9. 
+    see math.pdf for details
     
     p1: float; the power-law exponent at loga < log_ab
     p2: float; the power-law exponent at loga > log_ab
@@ -197,6 +197,131 @@ def ln_posterior_double_power_law(theta, theta_bounds, loga_i, contrast, d_pc,
         p1, p2, log_ab = theta
         lnlikelihood = ln_likelihood_double_power_law_with_weights(p1 = p1, p2 = p2, 
             log_ab = log_ab, loga_i = loga_i, contrast = contrast, d_pc = d_pc, 
+            loga_min = loga_min, loga_max = loga_max)
+    else:
+        lnlikelihood = 0 
+    return lnprior + lnlikelihood
+    
+    
+#### below here, functions for a single power law ######
+
+
+def single_power_law_likelihood(loga_i, p, loga_min, loga_max):
+    '''
+    likelihood for a single power law, divided by the phi0 term (i.e. not normalized)
+    
+    loga_i: array of floats, each of which is the log-separation of a single binary
+    p: float; the power-law exponent
+    loga_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    loga_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    a_i = 10**loga_i
+    phi_i = a_i**(-p)
+    return phi_i
+
+
+def analytic_integrand_weights_single_power_law(p, beta, theta_0, d_pc, loga_min,
+    loga_max):
+    '''
+    Helper function for computing the integral in the numerator of Eq 9. 
+    see math.pdf for details
+    
+    p: float; the power-law exponent
+    beta: float, characterizes how steeply f_delta(G) falls off (Eq A1)
+    theta_0: float, characterizes how steeply f_delta(G) falls off (Eq A1)
+    d_pc: array of floats; distance in pc to each binary. 
+    loga_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    loga_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    from scipy.special import hyp2f1
+    a_min, a_max = 10**loga_min, 10**loga_max
+    xmin, xmax = a_min/(d_pc*theta_0), a_max/(d_pc*theta_0)
+    gamma = 1 + beta - p
+    
+    I1 = 1/gamma*(xmax**gamma * hyp2f1(1, gamma/beta, 1 + gamma/beta, -xmax**beta) - 
+        xmin**gamma * hyp2f1(1, gamma/beta, 1 + gamma/beta, -xmin**beta))
+    I = (d_pc* theta_0)**(1-p) * I1 
+    return I
+
+def ln_likelihood_single_power_law_with_weights(p, loga_i, contrast, d_pc, 
+    loga_min, loga_max):
+    '''
+    log-likelihood function for a broken power law separation distribution
+    
+    p: float; the power-law exponent 
+    loga_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    loga_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    loga_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    beta, theta_0 = get_theta_0_and_beta_this_delta_G(delta_G = contrast)
+    denominator = analytic_integrand_weights_single_power_law(p = p,  
+        beta = beta, theta_0 = theta_0, d_pc = d_pc, 
+        loga_min = loga_min, loga_max = loga_max)
+    phi_i = single_power_law_likelihood(loga_i = loga_i, p = p, 
+        loga_min = loga_min, loga_max = loga_max)
+    return np.sum(np.log(phi_i) - np.log(denominator))
+    
+def run_mcmc_single_power_law(p0, theta_bounds, loga_i, contrast, d_pc, 
+    loga_min, loga_max, nwalkers = 100, n_steps = 100, burn = 100, nthread = 4):
+    '''
+    Run MCMC to fit separation distribution
+    returns a sampler object
+    p0: array of parameters, but there is just one free parameter [p] in this case
+    theta_bounds: array of the same length, but with a list of length
+        two (lower and upper bounds) at each element.
+    loga_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    loga_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    loga_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    other parameters describe the MCMC
+    
+    '''
+    import emcee
+    ndim = len(p0)
+    p0_ball = get_good_p0_ball(p0 = p0, theta_bounds = theta_bounds, nwalkers = nwalkers)
+
+    print('initialized walkers... burning in...')
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_posterior_single_power_law, 
+        args=[theta_bounds, loga_i, contrast, d_pc, loga_min, loga_max], threads = nthread)
+    pos, prob, state = sampler.run_mcmc(p0_ball, burn)
+    sampler.reset()
+    print('completed burn in ...')
+    for i, result in enumerate(sampler.sample(pos, iterations = n_steps)):
+        if (i+1) % 10 == 0:
+            print("{0:5.1%}".format(float(i) / n_steps))
+    return sampler
+    
+def ln_posterior_single_power_law(theta, theta_bounds, loga_i, contrast, d_pc, 
+    loga_min = -2, loga_max = 4.5):
+    '''
+    just ln_prior + ln_likelihood
+    p0: array of parameters, but there is just one free parameter [p] in this case
+    theta_bounds: array of the same length, but with a list of length
+        two (lower and upper bounds) at each element.
+    loga_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    loga_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    loga_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    lnprior = ln_flat_prior(theta = theta, theta_bounds = theta_bounds)
+    if np.isfinite(lnprior):
+        p = theta[0]
+        lnlikelihood = ln_likelihood_single_power_law_with_weights(p = p,
+            loga_i = loga_i, contrast = contrast, d_pc = d_pc, 
             loga_min = loga_min, loga_max = loga_max)
     else:
         lnlikelihood = 0 
