@@ -203,7 +203,7 @@ def ln_posterior_double_power_law(theta, theta_bounds, loga_i, contrast, d_pc,
     return lnprior + lnlikelihood
     
     
-#### below here, functions for a single power law ######
+#### functions for a single power law ######
 
 
 def single_power_law_likelihood(loga_i, p, loga_min, loga_max):
@@ -326,3 +326,141 @@ def ln_posterior_single_power_law(theta, theta_bounds, loga_i, contrast, d_pc,
     else:
         lnlikelihood = 0 
     return lnprior + lnlikelihood
+    
+#### functions for an Einasto-like distribution ######
+
+def get_weights_einasto_profile(s0, alpha, beta, theta_0, d_pc, logs_min, 
+    logs_max, _weights):
+    '''
+    Helper function for computing the integral in the numerator of Eq 9. 
+        
+    pass array to C function. This version is ~6 times faster than the equivalent written in Python
+    
+    s0 and alpha parameterize the Einasto profile
+    beta and theta0 are arrays parameterizing the sensitivity to a companion, for each binary
+    d_pc is the distance array for all the binaries
+    logs_min and logs_max are the bounds of integration
+    _weights is a C object corresponding to the function get_weights_einasto() in integrands.c
+    '''
+    import ctypes
+    beta_double = beta.astype(np.double)
+    theta0_double = theta_0.astype(np.double)
+    d_pc_double = d_pc.astype(np.double)
+    
+    weight_array = np.empty(len(beta), dtype = np.double)
+    
+    _weights(ctypes.c_int(len(beta)), ctypes.c_double(s0), ctypes.c_double(alpha),
+        ctypes.c_void_p(weight_array.ctypes.data), ctypes.c_void_p(beta_double.ctypes.data),
+        ctypes.c_void_p(theta0_double.ctypes.data), ctypes.c_void_p(d_pc_double.ctypes.data), 
+        ctypes.c_double(logs_min), ctypes.c_double(logs_max))
+
+    return weight_array
+    
+def read_in_C_function_weights(model = 'Einasto'):
+    '''
+    This returns a function to be passed to get_weights_einasto_profile(), which 
+    does the integral in C. 
+    '''
+    import ctypes
+    _weights = ctypes.CDLL('integrands.so')
+    if model == 'Einasto':
+        return _weights.get_weights_einasto
+    else:
+        raise ValueError('unknown model')
+        
+def einasto_likelihood(logs_i, s0, alpha, logs_min, logs_max):
+    '''
+    likelihood for an einasto distribution function, divided by the phi0 term (i.e. not normalized)
+    
+    logs_i: array of floats, each of which is the log-separation of a single binary
+    s0 and alpha: floats; they parameterize the Einasto profile
+    logs_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    logs_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    s_i = 10**logs_i
+    phi_i = np.exp(-(s_i/s0)**(alpha))
+    return phi_i
+
+def ln_likelihood_einasto_with_weights(s0, alpha, logs_i, contrast, d_pc, 
+    logs_min, logs_max):
+    '''
+    log-likelihood function for an einasto distribution function.
+    
+    s0 and alpha: floats; they parameterize the Einasto profile
+    logs_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    logs_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    logs_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    beta, theta_0 = get_theta_0_and_beta_this_delta_G(delta_G = contrast)
+    _weights = read_in_C_function_weights(model = 'Einasto')
+    denominator = get_weights_einasto_profile(s0 = s0, alpha = alpha, beta = beta,
+        theta_0 = theta_0, d_pc = d_pc, logs_min = logs_min, 
+        logs_max = logs_max, _weights = _weights)
+    phi_i = einasto_likelihood(logs_i = logs_i, s0 = s0, alpha = alpha, 
+        logs_min = logs_min, logs_max = logs_max)
+    return np.sum(np.log(phi_i) - np.log(denominator))
+
+    
+def ln_posterior_einasto(theta, theta_bounds, logs_i, contrast, d_pc, 
+    logs_min = -2, logs_max = 4.5):
+    '''
+    just ln_prior + ln_likelihood
+    p0: array of parameters, [logs0, alpha] in this case
+    theta_bounds: array of the same length, but with a list of length
+        two (lower and upper bounds) at each element.
+    logs_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    logs_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    logs_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    '''
+    lnprior = ln_flat_prior(theta = theta, theta_bounds = theta_bounds)
+    if np.isfinite(lnprior):
+        logs0, alpha = theta
+        lnlikelihood = ln_likelihood_einasto_with_weights(s0 = 10**logs0, alpha = alpha,
+            logs_i = logs_i, contrast = contrast, d_pc = d_pc, 
+            logs_min = logs_min, logs_max = logs_max)
+    else:
+        lnlikelihood = 0 
+    return lnprior + lnlikelihood
+
+def run_mcmc_einasto(p0, theta_bounds, logs_i, contrast, d_pc, 
+    logs_min, logs_max, nwalkers = 100, n_steps = 100, burn = 100, nthread = 4):
+    '''
+    Run MCMC to fit separation distribution
+    returns a sampler object
+    p0: array of parameters, [logs0, alpha] in this case
+    theta_bounds: array of the same length, but with a list of length
+        two (lower and upper bounds) at each element.
+    logs_i: array of floats, each of which is the log-separation of a single binary
+    contrast: array of magnitude differences for each binary
+    d_pc: array if distances to each binary
+    logs_min: float, minimum log-separation of the distribution from which separations 
+        are drawn
+    logs_max: float, maximum log-separation of the distribution from which separations 
+        are drawn    
+    other parameters describe the MCMC
+    
+    '''
+    import emcee
+    ndim = len(p0)
+    p0_ball = get_good_p0_ball(p0 = p0, theta_bounds = theta_bounds, nwalkers = nwalkers)
+
+    print('initialized walkers... burning in...')
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_posterior_einasto, 
+        args=[theta_bounds, logs_i, contrast, d_pc, logs_min, logs_max], threads = nthread)
+    pos, prob, state = sampler.run_mcmc(p0_ball, burn)
+    sampler.reset()
+    print('completed burn in ...')
+    for i, result in enumerate(sampler.sample(pos, iterations = n_steps)):
+        if (i+1) % 10 == 0:
+            print("{0:5.1%}".format(float(i) / n_steps))
+    return sampler
